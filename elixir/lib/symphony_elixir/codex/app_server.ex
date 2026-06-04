@@ -708,6 +708,46 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp maybe_handle_approval_request(
+         port,
+         "mcpServer/elicitation/request",
+         %{"id" => id, "params" => params} = payload,
+         payload_string,
+         on_message,
+         metadata,
+         _tool_executor,
+         true
+       )
+       when is_map(params) do
+    if mcp_tool_call_approval_elicitation?(params) do
+      send_message(port, %{"id" => id, "result" => %{"action" => "accept", "content" => %{}}})
+
+      emit_message(
+        on_message,
+        :approval_auto_approved,
+        %{payload: payload, raw: payload_string, decision: "mcp_tool_call_accept"},
+        metadata
+      )
+
+      :approved
+    else
+      :input_required
+    end
+  end
+
+  defp maybe_handle_approval_request(
+         _port,
+         "mcpServer/elicitation/request",
+         _payload,
+         _payload_string,
+         _on_message,
+         _metadata,
+         _tool_executor,
+         _auto_approve_requests
+       ) do
+    :input_required
+  end
+
+  defp maybe_handle_approval_request(
          _port,
          _method,
          _payload,
@@ -890,6 +930,21 @@ defmodule SymphonyElixir.Codex.AppServer do
       |> String.downcase()
 
     String.starts_with?(normalized_label, "approve") or String.starts_with?(normalized_label, "allow")
+  end
+
+  defp mcp_tool_call_approval_elicitation?(params) when is_map(params) do
+    params
+    |> mcp_elicitation_meta()
+    |> case do
+      %{} = meta -> Map.get(meta, "codex_approval_kind") == "mcp_tool_call"
+      _ -> false
+    end
+  end
+
+  defp mcp_tool_call_approval_elicitation?(_params), do: false
+
+  defp mcp_elicitation_meta(params) when is_map(params) do
+    Map.get(params, "_meta") || Map.get(params, :_meta) || Map.get(params, "meta") || Map.get(params, :meta)
   end
 
   defp await_response(port, request_id) do
