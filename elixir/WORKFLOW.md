@@ -30,6 +30,9 @@ hooks:
 agent:
   max_concurrent_agents: 10
   max_turns: 20
+  # Failed runs stop after this many retries and remain visibly blocked until
+  # the tracker item leaves the active workflow state.
+  max_retry_attempts: 3
 codex:
   command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
   approval_policy: never
