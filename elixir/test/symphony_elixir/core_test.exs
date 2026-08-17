@@ -18,6 +18,7 @@ defmodule SymphonyElixir.CoreTest do
     assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     assert config.tracker.assignee == nil
     assert config.agent.max_turns == 20
+    assert config.agent.max_retry_attempts == 3
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
 
@@ -1019,7 +1020,7 @@ defmodule SymphonyElixir.CoreTest do
              AgentRunner.continue_with_issue_for_test(issue, fetcher)
   end
 
-  test "normal worker exit schedules active-state continuation retry" do
+  test "normal worker exit schedules one active-state completion check" do
     issue_id = "issue-resume"
     ref = make_ref()
     orchestrator_name = Module.concat(__MODULE__, :ContinuationOrchestrator)
@@ -1054,9 +1055,56 @@ defmodule SymphonyElixir.CoreTest do
 
     refute Map.has_key?(state.running, issue_id)
     assert MapSet.member?(state.completed, issue_id)
-    assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
+
+    assert %{attempt: 1, delay_type: :completion_check, due_at_ms: due_at_ms} =
+             state.retry_attempts[issue_id]
+
     assert is_integer(due_at_ms)
-    assert_due_in_range(due_at_ms, 500, 1_100)
+    assert_due_in_range(due_at_ms, 300, 1_100)
+  end
+
+  test "completion check blocks an issue that remains active instead of redispatching it" do
+    issue_id = "issue-completed-still-active"
+    orchestrator_name = Module.concat(__MODULE__, :CompletedActiveOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-558A",
+      title: "Completed but still active",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-558A",
+      dispatchable: true
+    }
+
+    state =
+      pid
+      |> :sys.get_state()
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+
+    updated_state =
+      Orchestrator.handle_retry_issue_lookup_for_test(issue, state, issue_id, 1, %{
+        identifier: issue.identifier,
+        delay_type: :completion_check,
+        workspace_path: "/tmp/MT-558A"
+      })
+
+    refute Map.has_key?(updated_state.running, issue_id)
+    refute Map.has_key?(updated_state.retry_attempts, issue_id)
+    assert MapSet.member?(updated_state.claimed, issue_id)
+    assert MapSet.member?(updated_state.completed, issue_id)
+
+    assert %{error: error, workspace_path: "/tmp/MT-558A"} =
+             updated_state.blocked[issue_id]
+
+    assert error =~ "automatic redispatch suppressed"
   end
 
   test "abnormal worker exit increments retry attempt progressively" do
@@ -1136,6 +1184,54 @@ defmodule SymphonyElixir.CoreTest do
              state.retry_attempts[issue_id]
 
     assert_due_in_range(due_at_ms, 9_000, 10_500)
+  end
+
+  test "abnormal worker exit blocks after the configured retry limit" do
+    write_workflow_file!(Workflow.workflow_file_path(), max_retry_attempts: 3)
+
+    issue_id = "issue-crash-exhausted"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :CrashRetryExhaustedOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-560A",
+      retry_attempt: 3,
+      issue: %Issue{
+        id: issue_id,
+        identifier: "MT-560A",
+        title: "Retry exhaustion",
+        state: "In Progress"
+      },
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :boom})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    assert %{error: error} = state.blocked[issue_id]
+    assert error =~ "retry limit exhausted"
+    assert error =~ "max_retry_attempts=3"
   end
 
   test "stale retry timer messages do not consume newer retry entries" do

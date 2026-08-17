@@ -131,6 +131,7 @@ hooks:
 agent:
   max_concurrent_agents: 10
   max_turns: 20
+  max_retry_attempts: 3
 codex:
   command: codex app-server
 ---
@@ -165,6 +166,11 @@ Notes:
   by the Codex turn sandbox.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
+- After those turns complete, Symphony performs one tracker-state check. If the issue is still
+  active, Symphony keeps it visibly blocked instead of automatically starting another Codex
+  session. Moving the issue out of the lane's active states releases that block.
+- `agent.max_retry_attempts` caps retries after crashes, timeouts, and tracker refresh failures.
+  Exhausted retries remain visibly blocked. Default: `3`; set `0` to disable failure retries.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run

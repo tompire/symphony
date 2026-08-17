@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+codex_bin="${SYMPHONY_CODEX_BIN:-/home/tom/.local/bin/codex}"
+
+fail() {
+  printf 'symphony codex guard: %s\n' "$1" >&2
+  exit "${2:-78}"
+}
+
+for variable_name in OPENAI_API_KEY CODEX_API_KEY CODEX_ACCESS_TOKEN; do
+  if [[ -n "${!variable_name:-}" ]]; then
+    fail "$variable_name must not be present; Symphony requires workstation ChatGPT authentication"
+  fi
+done
+
+[[ -x "$codex_bin" ]] || fail "Codex executable not found at $codex_bin"
+
+login_status="$($codex_bin login status 2>&1 || true)"
+[[ "$login_status" == "Logged in using ChatGPT" ]] ||
+  fail "Codex is not logged in using ChatGPT (reported: ${login_status:-not logged in})"
+
+if [[ "${1:-}" == "--check" ]]; then
+  printf 'symphony codex guard: ChatGPT authentication verified\n'
+  exit 0
+fi
+
+runtime_root="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/symphony-codex-guard"
+window_seconds="${SYMPHONY_CODEX_START_WINDOW_SECONDS:-21600}"
+max_starts="${SYMPHONY_CODEX_MAX_STARTS_PER_WINDOW:-3}"
+
+[[ "$window_seconds" =~ ^[1-9][0-9]*$ ]] || fail "invalid start window: $window_seconds"
+[[ "$max_starts" =~ ^[1-9][0-9]*$ ]] || fail "invalid maximum starts: $max_starts"
+
+install -d -m 0700 "$runtime_root"
+
+workspace_key="$(printf '%s' "$PWD" | sha256sum | cut -d' ' -f1)"
+state_file="$runtime_root/$workspace_key.starts"
+lock_dir="$runtime_root/$workspace_key.lock"
+now="$(date +%s)"
+cutoff="$((now - window_seconds))"
+
+lock_attempt=0
+until mkdir "$lock_dir" 2>/dev/null; do
+  lock_attempt="$((lock_attempt + 1))"
+  (( lock_attempt < 100 )) || fail "could not acquire launch-state lock" 75
+  sleep 0.05
+done
+trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
+
+temporary_state="$state_file.$$"
+: > "$temporary_state"
+recent_count=0
+if [[ -f "$state_file" ]]; then
+  while IFS= read -r timestamp; do
+    if [[ "$timestamp" =~ ^[0-9]+$ ]] && (( timestamp > cutoff )); then
+      printf '%s\n' "$timestamp" >> "$temporary_state"
+      recent_count="$((recent_count + 1))"
+    fi
+  done < "$state_file"
+fi
+
+if (( recent_count >= max_starts )); then
+  fail "launch circuit open for $PWD: ${recent_count} starts within ${window_seconds}s" 75
+fi
+
+printf '%s\n' "$now" >> "$temporary_state"
+chmod 0600 "$temporary_state"
+mv "$temporary_state" "$state_file"
+
+rmdir "$lock_dir"
+trap - EXIT
+exec "$codex_bin" "$@"
