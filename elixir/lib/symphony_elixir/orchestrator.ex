@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, Reliability, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Tracker.Issue
 
   @completion_check_delay_ms 1_000
@@ -237,6 +237,14 @@ defmodule SymphonyElixir.Orchestrator do
 
     Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
 
+    Reliability.alert("needs_input", %{
+      identifier: running_entry.identifier,
+      issue_url: running_entry.issue.url,
+      session_id: session_id,
+      error: error,
+      state: running_entry.issue.state
+    })
+
     block_issue_from_entry(state, issue_id, running_entry, error)
   end
 
@@ -244,6 +252,14 @@ defmodule SymphonyElixir.Orchestrator do
     Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
 
     next_attempt = next_retry_attempt_from_running(running_entry)
+
+    Reliability.alert("agent_exit", %{
+      identifier: running_entry.identifier,
+      issue_url: running_entry.issue.url,
+      session_id: session_id,
+      error: "agent exited: #{inspect(reason)}",
+      attempt: next_attempt
+    })
 
     schedule_issue_retry(state, issue_id, next_attempt, %{
       identifier: running_entry.identifier,
@@ -1155,6 +1171,9 @@ defmodule SymphonyElixir.Orchestrator do
         cleanup_issue_workspace(issue, metadata)
         {:noreply, release_issue_claim(state, issue_id)}
 
+      smoke_failed_issue?(issue) and metadata[:delay_type] == :completion_check ->
+        {:noreply, block_smoke_failed_issue(state, issue_id, issue, metadata)}
+
       retry_candidate_issue?(issue, terminal_states) and
           metadata[:delay_type] == :completion_check ->
         {:noreply, block_completed_active_issue(state, issue_id, issue, metadata)}
@@ -1180,6 +1199,13 @@ defmodule SymphonyElixir.Orchestrator do
 
     Logger.warning("Blocking completed active issue_id=#{issue_id} issue_identifier=#{issue.identifier}: #{error}")
 
+    Reliability.alert("tracker_state_mismatch", %{
+      identifier: issue.identifier,
+      issue_url: issue.url,
+      state: issue.state,
+      error: error
+    })
+
     blocked_entry = %{
       issue_id: issue_id,
       identifier: issue.identifier,
@@ -1203,6 +1229,43 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
+  defp smoke_failed_issue?(%Issue{state: state}), do: state in ["Smoke Failed", "Smoke failed"]
+  defp smoke_failed_issue?(_issue), do: false
+
+  defp block_smoke_failed_issue(state, issue_id, issue, metadata) do
+    error = "smoke failed after agent completion; operator repair/retry is required"
+
+    Logger.error("Blocking smoke-failed issue_id=#{issue_id} issue_identifier=#{issue.identifier}: #{error}")
+
+    Reliability.alert("smoke_failed", %{
+      identifier: issue.identifier,
+      issue_url: issue.url,
+      state: issue.state,
+      error: error
+    })
+
+    blocked_entry = %{
+      issue_id: issue_id,
+      identifier: issue.identifier,
+      issue: issue,
+      worker_host: metadata[:worker_host],
+      workspace_path: metadata[:workspace_path],
+      session_id: nil,
+      error: error,
+      blocked_at: DateTime.utc_now(),
+      last_codex_message: nil,
+      last_codex_event: nil,
+      last_codex_timestamp: nil
+    }
+
+    %{
+      state
+      | retry_attempts: Map.delete(state.retry_attempts, issue_id),
+        claimed: MapSet.put(state.claimed, issue_id),
+        blocked: Map.put(state.blocked, issue_id, blocked_entry)
+    }
+  end
+
   defp block_retry_exhausted(state, issue_id, next_attempt, max_retry_attempts, metadata) do
     error =
       "retry limit exhausted before attempt #{next_attempt}; max_retry_attempts=#{max_retry_attempts}; last_error=#{metadata[:error] || "unknown"}"
@@ -1210,6 +1273,14 @@ defmodule SymphonyElixir.Orchestrator do
     identifier = metadata[:identifier] || issue_id
 
     Logger.error("Blocking retry-exhausted issue_id=#{issue_id} issue_identifier=#{identifier}: #{error}")
+
+    Reliability.alert("retry_exhausted", %{
+      identifier: identifier,
+      issue_url: metadata[:issue_url],
+      error: error,
+      attempt: next_attempt,
+      max_retry_attempts: max_retry_attempts
+    })
 
     blocked_entry = %{
       issue_id: issue_id,
