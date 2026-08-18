@@ -83,7 +83,7 @@ defmodule SymphonyElixir.Reliability do
 
       base = env("LANGFUSE_BASE_URL") || "https://cloud.langfuse.com"
 
-      case Req.post("#{String.trim_trailing(base, "/")}/api/public/ingestion", auth: {:basic, public, secret}, json: payload, receive_timeout: 10_000) do
+      case Req.post("#{String.trim_trailing(base, "/")}/api/public/ingestion", auth: {:basic, "#{public}:#{secret}"}, json: payload, receive_timeout: 10_000) do
         {:ok, %{status: status}} when status in 200..299 -> :ok
         {:ok, response} -> Logger.error("Langfuse reliability trace returned #{response.status}")
         {:error, reason} -> Logger.error("Langfuse reliability trace failed: #{inspect(reason)}")

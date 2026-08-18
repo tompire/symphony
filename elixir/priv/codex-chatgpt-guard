@@ -27,7 +27,7 @@ fi
 
 runtime_root="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/symphony-codex-guard"
 window_seconds="${SYMPHONY_CODEX_START_WINDOW_SECONDS:-21600}"
-max_starts="${SYMPHONY_CODEX_MAX_STARTS_PER_WINDOW:-3}"
+max_starts="${SYMPHONY_CODEX_MAX_STARTS_PER_WINDOW:-12}"
 
 [[ "$window_seconds" =~ ^[1-9][0-9]*$ ]] || fail "invalid start window: $window_seconds"
 [[ "$max_starts" =~ ^[1-9][0-9]*$ ]] || fail "invalid maximum starts: $max_starts"
